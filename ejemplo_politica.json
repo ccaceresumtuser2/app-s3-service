@@ -1,0 +1,32 @@
+{
+  "policies": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "ListBucketForDeleteAll",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::385628809825:root"
+        },
+        "Action": [
+          "s3:GetBucketVersioning",
+          "s3:ListBucket",
+          "s3:ListBucketVersions"
+        ],
+        "Resource": "arn:aws:s3:::bucket-udc-2026"
+      },
+      {
+        "Sid": "DeleteAllBucketObjects",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::385628809825:root"
+        },
+        "Action": [
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ],
+        "Resource": "arn:aws:s3:::bucket-udc-2026/*"
+      }
+    ]
+  }
+}
