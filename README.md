@@ -247,4 +247,4 @@ Como consumidor de la API, quiero interpretar una misma estructura JSON en todos
 
 ## Diagramas de arquitectura
 
-El archivo [arquitectura_s3.drawio](arquitectura_s3.drawio) contiene dos páginas editables en diagrams.net: **Componentes** muestra las capas de la aplicación y sus dependencias; **Despliegue** representa la ejecución local actual en Windows, el puerto `8090`, las credenciales AWS, la carpeta `C:/download` y las conexiones HTTPS a S3/STS.
+El archivo [arquitectura/arquitectura_s3.drawio](arquitectura/arquitectura_s3.drawio) contiene dos páginas editables en diagrams.net: **Componentes** muestra `main.py`, rutas, schemas Pydantic, servicios, repositorio y `s3_operations.py`; **Despliegue** representa la ejecución local actual en Windows, el puerto `8090`, las credenciales AWS, la carpeta `C:/download` y las conexiones HTTPS a S3/STS.
