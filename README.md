@@ -183,6 +183,323 @@ La API no implementa autenticacion propia. No la expongas a redes no confiables 
 
 Las respuestas JSON de los endpoints siguen el mismo formato. Las descargas de objetos son la excepción: conservan el cuerpo binario y las cabeceras necesarias para que el archivo no se corrompa.
 
+## Referencia tecnica de endpoints
+
+La URL base local es `http://localhost:8090`. Los parametros entre llaves son segmentos de ruta; `key` admite subrutas separadas por `/`. Los requests JSON usan `Content-Type: application/json`, y la subida de archivos usa `multipart/form-data`.
+
+El flujo normal es: FastAPI recibe la solicitud y valida los datos con los schemas Pydantic; `app/api/routes.py` invoca el caso de uso de `app/services/s3_service.py`; el servicio delega las operaciones AWS a `app/repositories/s3_repository.py`, que usa los clientes de `s3_operations.py`. Las operaciones JSON exitosas devuelven:
+
+```json
+{
+  "success": true,
+  "message": "Operacion completada.",
+  "data": {},
+  "errors": []
+}
+```
+
+`data` contiene el resultado especifico de la operacion. Las respuestas de error usan `success: false`, `data: null` y una lista `errors` con `code`, `message` y, en errores de validacion, `field`.
+
+### Salud y conectividad
+
+| Metodo y ruta | Entrada | Ejecucion y respuesta |
+| --- | --- | --- |
+| `GET /healthz` | Sin parametros. | Comprueba que el proceso responde. Devuelve `200` y `data.status: "ok"`; no consulta AWS. |
+| `GET /health/aws` | Sin parametros. | Llama a AWS STS `GetCallerIdentity` con el perfil configurado. Devuelve `200` con `connected`, `account_id`, `arn` y `region`. Un fallo de credenciales o conectividad devuelve `503`. |
+
+### Buckets
+
+| Metodo y ruta | Entrada | Ejecucion y respuesta |
+| --- | --- | --- |
+| `GET /buckets` | Sin parametros. | Lista los buckets visibles para las credenciales y devuelve `name` y `creation_date` ISO 8601 por bucket. |
+| `POST /buckets` | JSON `{"name":"nombre-base"}`. `name` debe tener entre 3 y 52 caracteres. | Construye el nombre final como `<name>-DD-MM-YYYY`, usando la fecha local del proceso; verifica si ya aparece en la lista de buckets y luego lo crea. Devuelve `201` con `name` y `created: true`; si el nombre generado ya existe, devuelve `409`. |
+| `DELETE /buckets/{bucket}` | Nombre del bucket en la ruta. | Solicita a S3 eliminar el bucket. Devuelve `200` con `name` y `deleted: true`. S3 solo permite eliminar buckets vacios; un bucket no vacio se informa como `409`. |
+
+### Politicas de bucket
+
+| Metodo y ruta | Entrada | Ejecucion y respuesta |
+| --- | --- | --- |
+| `PUT /buckets/{bucket}/policy` | JSON con la politica dentro de `policies`, por ejemplo `{"policies":{"Version":"2012-10-17","Statement":[]}}`. | Serializa el objeto `policies` como JSON y llama a `PutBucketPolicy`. Si se acepta, devuelve `200` con `bucket` y `applied: true`. La politica nueva reemplaza la politica existente. |
+| `DELETE /buckets/{bucket}/policy` | Nombre del bucket en la ruta. | Llama a `DeleteBucketPolicy`. Si se acepta, devuelve `200` con `bucket` y `deleted: true`. |
+
+### Objetos
+
+| Metodo y ruta | Entrada | Ejecucion y respuesta |
+| --- | --- | --- |
+| `GET /buckets/{bucket}/objects` | Parametro query opcional `prefix`; por ejemplo `?prefix=carpeta/`. | Usa el paginador `list_objects_v2` y devuelve `key`, `size` en bytes y `last_modified` ISO 8601 para cada objeto coincidente. |
+| `PUT /buckets/{bucket}/objects/{key}` | Cuerpo `multipart/form-data` con el campo `file`. `key` puede incluir subcarpetas. | Transfiere el archivo a S3 con la key solicitada. Devuelve `201` con `bucket`, `key` y `uploaded: true`. El archivo recibido se cierra al terminar, incluso si la operacion falla. |
+| `GET /buckets/{bucket}/objects/{key}` | Bucket y key en la ruta. | Obtiene el objeto desde S3, lo escribe en bloques de 1 MiB en `C:/download/<bucket>/<key>` y entrega el mismo archivo como respuesta binaria. Incluye `Content-Disposition` para la descarga y `X-Saved-To` con la ruta local. Los segmentos invalidos para Windows se sustituyen para formar la ruta local. |
+| `DELETE /buckets/{bucket}/objects/{key}` | Bucket y key en la ruta. | Llama a `DeleteObject` para esa key. Devuelve `200` con `bucket`, `key` y `deleted: true` si S3 acepta la solicitud. |
+| `DELETE /buckets/{bucket}/objects` | Query obligatorio `confirm=true`; por defecto `confirm=false`. | Sin confirmacion responde `400` y no inicia el borrado. Con confirmacion, pagina los objetos y elimina lotes de hasta 1.000. Si el versionado esta habilitado o suspendido, tambien elimina todas las versiones y delete markers. Devuelve `200` con `deleted_count` y `errors`; revisa `errors` para detectar fallos parciales por objeto. |
+
+### Errores y permisos AWS
+
+Los datos invalidos o faltantes se rechazan con `422`. Los errores AWS se traducen a respuestas HTTP: bucket u objeto inexistente, `404`; acceso denegado, `403`; bucket existente, no vacio o conflicto de nombre, `409`; argumentos o politica invalidos, `400`; otros errores de AWS, `502`. Los errores inesperados devuelven `500` sin exponer detalles internos.
+
+El perfil AWS `default` debe tener permisos para la operacion solicitada. Entre las acciones usadas estan `sts:GetCallerIdentity`, las acciones de listado/creacion/eliminacion de buckets y las acciones `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` y de politicas. Para vaciar buckets versionados se necesitan ademas `s3:GetBucketVersioning`, `s3:ListBucketVersions` y `s3:DeleteObjectVersion`. La API no agrega autenticacion propia; no la expongas a redes no confiables.
+
+### Ejemplos de request y response
+
+Los siguientes ejemplos usan `curl.exe` desde PowerShell contra `http://localhost:8090`. Los nombres de bucket, cuenta, fechas, rutas y metadatos de los ejemplos son ilustrativos; las respuestas dependen de los recursos reales y de las credenciales AWS.
+
+#### `GET /healthz`
+
+Request:
+
+```powershell
+curl.exe -i http://localhost:8090/healthz
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Servicio disponible.",
+  "data": {"status": "ok"},
+  "errors": []
+}
+```
+
+#### `GET /health/aws`
+
+Request:
+
+```powershell
+curl.exe -i http://localhost:8090/health/aws
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Conexión con AWS verificada.",
+  "data": {
+    "connected": true,
+    "account_id": "123456789012",
+    "arn": "arn:aws:iam::123456789012:user/lab-user",
+    "region": "us-east-1",
+    "message": null
+  },
+  "errors": []
+}
+```
+
+#### `GET /buckets`
+
+Request:
+
+```powershell
+curl.exe -i http://localhost:8090/buckets
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Buckets listados.",
+  "data": [
+    {"name": "documentos-lab", "creation_date": "2026-09-20T12:30:15+00:00"}
+  ],
+  "errors": []
+}
+```
+
+#### `POST /buckets`
+
+Request:
+
+```powershell
+curl.exe -i -X POST http://localhost:8090/buckets `
+  -H "Content-Type: application/json" `
+  -d '{"name":"documentos-lab"}'
+```
+
+Response (`201 Created`):
+
+```json
+{
+  "success": true,
+  "message": "Bucket creado.",
+  "data": {"name": "documentos-lab-03-10-2026", "created": true},
+  "errors": []
+}
+```
+
+#### `DELETE /buckets/{bucket}`
+
+Request:
+
+```powershell
+curl.exe -i -X DELETE http://localhost:8090/buckets/documentos-lab-03-10-2026
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Bucket eliminado.",
+  "data": {"name": "documentos-lab-03-10-2026", "deleted": true},
+  "errors": []
+}
+```
+
+#### `PUT /buckets/{bucket}/policy`
+
+Este ejemplo aplica una politica que permite a la cuenta indicada listar el bucket. `PutBucketPolicy` reemplaza la politica actual; adapta la cuenta y los permisos con cuidado.
+
+Request:
+
+```powershell
+curl.exe -i -X PUT http://localhost:8090/buckets/documentos-lab/policy `
+  -H "Content-Type: application/json" `
+  -d '{"policies":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:root"},"Action":"s3:ListBucket","Resource":"arn:aws:s3:::documentos-lab"}]}}'
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Política del bucket aplicada.",
+  "data": {"bucket": "documentos-lab", "applied": true},
+  "errors": []
+}
+```
+
+#### `DELETE /buckets/{bucket}/policy`
+
+Request:
+
+```powershell
+curl.exe -i -X DELETE http://localhost:8090/buckets/documentos-lab/policy
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Política del bucket eliminada.",
+  "data": {"bucket": "documentos-lab", "deleted": true},
+  "errors": []
+}
+```
+
+#### `GET /buckets/{bucket}/objects`
+
+Request (lista objetos cuyo key empieza con `reportes/`):
+
+```powershell
+curl.exe -i "http://localhost:8090/buckets/documentos-lab/objects?prefix=reportes/"
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Objetos listados.",
+  "data": [
+    {
+      "key": "reportes/resumen.pdf",
+      "size": 2048,
+      "last_modified": "2026-10-02T18:42:10+00:00"
+    }
+  ],
+  "errors": []
+}
+```
+
+#### `PUT /buckets/{bucket}/objects/{key}`
+
+Request (cambia la ruta local por el archivo que quieras subir):
+
+```powershell
+curl.exe -i -X PUT "http://localhost:8090/buckets/documentos-lab/objects/reportes/resumen.pdf" `
+  -F "file=@C:\archivos\resumen.pdf"
+```
+
+Response (`201 Created`):
+
+```json
+{
+  "success": true,
+  "message": "Objeto subido.",
+  "data": {
+    "bucket": "documentos-lab",
+    "key": "reportes/resumen.pdf",
+    "uploaded": true
+  },
+  "errors": []
+}
+```
+
+#### `GET /buckets/{bucket}/objects/{key}`
+
+Request:
+
+```powershell
+curl.exe -i -OJ "http://localhost:8090/buckets/documentos-lab/objects/reportes/resumen.pdf"
+```
+
+Response (`200 OK`): el cuerpo es el contenido binario del archivo, no un documento JSON. La API tambien guarda una copia en `C:/download/documentos-lab/reportes/resumen.pdf`. Las cabeceras incluyen, por ejemplo:
+
+```http
+Content-Disposition: attachment; filename="resumen.pdf"
+Content-Type: application/pdf
+X-Saved-To: C:/download/documentos-lab/reportes/resumen.pdf
+```
+
+#### `DELETE /buckets/{bucket}/objects/{key}`
+
+Request:
+
+```powershell
+curl.exe -i -X DELETE "http://localhost:8090/buckets/documentos-lab/objects/reportes/resumen.pdf"
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "message": "Objeto eliminado.",
+  "data": {
+    "bucket": "documentos-lab",
+    "key": "reportes/resumen.pdf",
+    "deleted": true
+  },
+  "errors": []
+}
+```
+
+#### `DELETE /buckets/{bucket}/objects?confirm=true`
+
+Request:
+
+```powershell
+curl.exe -i -X DELETE "http://localhost:8090/buckets/documentos-lab/objects?confirm=true"
+```
+
+Response (`200 OK`; `errors` puede contener fallos parciales devueltos por S3):
+
+```json
+{
+  "success": true,
+  "message": "Operación de borrado masivo completada.",
+  "data": {
+    "bucket": "documentos-lab",
+    "deleted_count": 2,
+    "errors": []
+  },
+  "errors": []
+}
+```
+
 ## Historias de usuario y criterios de aceptación
 
 ### HU-01: Comprobar el estado y la conexión con AWS
